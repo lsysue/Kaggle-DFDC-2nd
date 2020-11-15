@@ -1,4 +1,5 @@
 #!/bin/bash
+# set ff=unix
 
 export PYTHONPATH="external/Pytorch_Retinaface/$PYTHONPATH"
 
