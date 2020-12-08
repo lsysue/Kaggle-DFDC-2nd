@@ -1,3 +1,4 @@
+# 原模型结构 + 多帧概率计算trick
 import os
 import sys
 import time
@@ -83,24 +84,25 @@ class DFDCLoader:
         batch_buf = []
         t0 = time.time()
         batch_count = 0
-
+        last_name = ""
         for fname, face in self.iter_one_face():
-            self.feedback_queue.append(fname)
-            if not batch_buf:   # batch_buf is clear
-                self.infer_start[fname] = time.time()
-            batch_buf.append(face)
-
-            if len(batch_buf) == self.batch_size:
+            if last_name != fname and last_name != "":
                 yield torch.stack(batch_buf)
-
+                
                 batch_count += 1
                 batch_buf.clear()
                 if batch_count % 10 == 0:
                     elapsed = 1000 * (time.time() - t0)
                     print("T: %.2f ms / batch" % (elapsed / batch_count))
                     # 测试控制
-                    # break
+                    # break"
 
+            self.feedback_queue.append(fname)
+            if not batch_buf:   # batch_buf is clear
+                self.infer_start[fname] = time.time()
+            batch_buf.append(face)
+            last_name = fname
+                
         if len(batch_buf) > 0:
             yield torch.stack(batch_buf)
 
@@ -113,8 +115,19 @@ class DFDCLoader:
             self.record[fname].append(score)
 
         for fname in sorted(accessed):
-            # 各帧取平均
-            self.score[fname] = np.mean(self.record[fname])
+            # 多帧概率计算trick
+            record_temp =  np.array(self.record[fname])
+            frame_num = len(record_temp)
+            fakes = np.count_nonzero(record_temp > 0.5)
+            # 11 frames are detected as fakes with high probability
+            if fakes > frame_num // 2.5 and fakes > 11:
+                # 如果判定为假的帧超过 0.4 倍的总帧数或者假帧超过11帧
+                self.score[fname] = np.mean(record_temp[record_temp > 0.5])
+                # 将判定为假的取平均值作为最终的结果
+            elif np.count_nonzero(record_temp < 0.2) > 0.9 * frame_num:
+                self.score[fname] = np.mean(record_temp[record_temp < 0.2])
+            else:
+                self.score[fname] = np.mean(record_temp)
             # 推断开始时间，推断结束时间
             self.infer_end[fname] = time.time()
             print("[%s] %.6f | %.3f ms" % (fname, self.score[fname], (self.infer_end[fname] - self.infer_start[fname]) * 1000))
@@ -166,7 +179,7 @@ def main(arg_dir):
         out = 0.2 * o1 + 0.7 * o2 + 0.1 * o3
         loader.feedback(out)
 
-    with open("submission.csv", "w") as fout:
+    with open("result1.csv", "w") as fout:
         for fname in loader.file_list:
             pred = loader.score[fname]
             start_time = loader.infer_start[fname] * 1000

@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import csv
+import simplejson as json
 
 import cv2
 import numpy as np
@@ -13,6 +15,7 @@ from torchvision import transforms as T
 
 from face_utils import norm_crop, FaceDetector
 from model_def import WSDAN, xception
+
 
 
 class DFDCLoader:
@@ -37,6 +40,7 @@ class DFDCLoader:
 
     def iter_one_face(self):
         for fname in self.file_list:
+            # print("fname",fname)
             path = os.path.join(self.video_dir, fname)
             reader = cv2.VideoCapture(path)
             face_count = 0
@@ -79,18 +83,12 @@ class DFDCLoader:
     def __iter__(self):
         self.record.clear()
         self.feedback_queue.clear()
-
         batch_buf = []
         t0 = time.time()
         batch_count = 0
 
         for fname, face in self.iter_one_face():
-            self.feedback_queue.append(fname)
-            if not batch_buf:   # batch_buf is clear
-                self.infer_start[fname] = time.time()
-            batch_buf.append(face)
-
-            if len(batch_buf) == self.batch_size:
+            if last_name != fname and last_name != "":
                 yield torch.stack(batch_buf)
 
                 batch_count += 1
@@ -100,25 +98,20 @@ class DFDCLoader:
                     print("T: %.2f ms / batch" % (elapsed / batch_count))
                     # 测试控制
                     # break
+            self.feedback_queue.append(fname)
+
+            if not batch_buf:   # batch_buf is clear
+                self.infer_start[fname] = time.time()
+            batch_buf.append(face)
+            last_name = fname
 
         if len(batch_buf) > 0:
             yield torch.stack(batch_buf)
 
-    def feedback(self, pred):
-        accessed = set()
-
-        for score in pred:
-            fname = self.feedback_queue.pop(0)
-            accessed.add(fname)
-            self.record[fname].append(score)
-
-        for fname in sorted(accessed):
-            # 各帧取平均
-            self.score[fname] = np.mean(self.record[fname])
-            # 推断开始时间，推断结束时间
-            self.infer_end[fname] = time.time()
-            print("[%s] %.6f | %.3f ms" % (fname, self.score[fname], (self.infer_end[fname] - self.infer_start[fname]) * 1000))
-
+    def file_for_xgboost(self, o1, o2, o3, label):
+        with open("./model_scores.csv", "a") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow([o1, o2, o3, label])
 
 def main(arg_dir):
     torch.set_grad_enabled(False)
@@ -131,7 +124,6 @@ def main(arg_dir):
     loader = DFDCLoader(test_dir, face_detector, T.ToTensor())
 
     model1 = xception(num_classes=2, pretrained=False)
-    ckpt = torch.load("./pretrained_weights/xception-hg-2.pth")
     model1.load_state_dict(ckpt["state_dict"])
     model1 = model1.cuda()
     model1.eval()
@@ -149,6 +141,25 @@ def main(arg_dir):
     zhq_nm_avg = torch.Tensor([.4479, .3744, .3473]).view(1, 3, 1, 1).cuda()
     zhq_nm_std = torch.Tensor([.2537, .2502, .2424]).view(1, 3, 1, 1).cuda()
 
+    # load label message
+    # 将json文件的groundtruth信息读到一个列表中
+    data_list = []
+    with open('./part_dfdc.json', 'r') as f:
+        json_data = json.load(f)    #此时json_data是一个字典对象
+        for key in json_data:  # 遍历字典a获取key
+            key_data_list = json_data[key]
+            for k_data in key_data_list:
+                data_list.append(k_data)
+
+    # 将列表转换为字典，方便读取groundtruth
+    data_dict = {}
+    for data in data_list:
+        data_dict[data[0]] = data[1]
+    
+    with open("./model_scores1.csv", "w") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["model1_score", "model2_score", "model3_score", "ground_truth"])
+
     for batch in loader:
         batch = batch.cuda(non_blocking=True)
         i1 = F.interpolate(batch, size=299, mode="bilinear")
@@ -163,15 +174,14 @@ def main(arg_dir):
         o3, _, _ = model3(i3)
         o3 = o3.softmax(-1)[:, 1].cpu().numpy()
 
-        out = 0.2 * o1 + 0.7 * o2 + 0.1 * o3
-        loader.feedback(out)
+        for i in range(loader.batch_size):
+            video_name = loader.feedback_queue.pop(0).split('.')[0]
+        label = data_dict[video_name]
+        # print("video_name: ", video_name)
 
-    with open("submission.csv", "w") as fout:
-        for fname in loader.file_list:
-            pred = loader.score[fname]
-            start_time = loader.infer_start[fname] * 1000
-            end_time = loader.infer_end[fname] * 1000
-            print("%s\t%.6f\t%d\t%d" % (fname.split('.')[0], pred, start_time, end_time), file=fout)
+        batch_size = o1.size
+        for i in range(0,batch_size):
+            loader.file_for_xgboost(o1[i], o2[i], o3[i], label)
 
 
 if __name__ == "__main__":

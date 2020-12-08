@@ -1,3 +1,4 @@
+# 原模型结构 + 概率计算trick + 模型集成trick
 import os
 import sys
 import time
@@ -83,14 +84,9 @@ class DFDCLoader:
         batch_buf = []
         t0 = time.time()
         batch_count = 0
-
+        last_name = ""
         for fname, face in self.iter_one_face():
-            self.feedback_queue.append(fname)
-            if not batch_buf:   # batch_buf is clear
-                self.infer_start[fname] = time.time()
-            batch_buf.append(face)
-
-            if len(batch_buf) == self.batch_size:
+            if last_name != fname and last_name != "":
                 yield torch.stack(batch_buf)
 
                 batch_count += 1
@@ -100,25 +96,23 @@ class DFDCLoader:
                     print("T: %.2f ms / batch" % (elapsed / batch_count))
                     # 测试控制
                     # break
+            if last_name != fname: 
+                self.feedback_queue.append(fname)
+
+            if not batch_buf:   # batch_buf is clear
+                self.infer_start[fname] = time.time()
+            batch_buf.append(face)
+            last_name = fname
 
         if len(batch_buf) > 0:
             yield torch.stack(batch_buf)
 
     def feedback(self, pred):
-        accessed = set()
-
-        for score in pred:
-            fname = self.feedback_queue.pop(0)
-            accessed.add(fname)
-            self.record[fname].append(score)
-
-        for fname in sorted(accessed):
-            # 各帧取平均
-            self.score[fname] = np.mean(self.record[fname])
-            # 推断开始时间，推断结束时间
-            self.infer_end[fname] = time.time()
-            print("[%s] %.6f | %.3f ms" % (fname, self.score[fname], (self.infer_end[fname] - self.infer_start[fname]) * 1000))
-
+        fname = self.feedback_queue.pop(0)
+        self.score[fname] = pred
+        print(pred)
+        self.infer_end[fname] = time.time()
+        print("[%s] %.6f | %.3f ms" % (fname, self.score[fname], (self.infer_end[fname] - self.infer_start[fname]) * 1000))
 
 def main(arg_dir):
     torch.set_grad_enabled(False)
@@ -163,10 +157,19 @@ def main(arg_dir):
         o3, _, _ = model3(i3)
         o3 = o3.softmax(-1)[:, 1].cpu().numpy()
 
-        out = 0.2 * o1 + 0.7 * o2 + 0.1 * o3
-        loader.feedback(out)
+        track_probs = np.concatenate((o1, o2, o3))
 
-    with open("submission.csv", "w") as fout:
+        delta = track_probs - 0.5
+        sign = np.sign(delta)
+        pos_delta = delta > 0
+        neg_delta = delta < 0
+        track_probs[pos_delta] = np.clip(0.5 + sign[pos_delta] * np.power(abs(delta[pos_delta]), 0.65), 0.01, 0.99)
+        track_probs[neg_delta] = np.clip(0.5 + sign[neg_delta] * np.power(abs(delta[neg_delta]), 0.65), 0.01, 0.99)
+        weights = np.power(abs(delta), 1.0) + 1e-4
+        video_score = float((track_probs * weights).sum() / weights.sum())
+        loader.feedback(video_score)
+
+    with open("result2.csv", "w") as fout:
         for fname in loader.file_list:
             pred = loader.score[fname]
             start_time = loader.infer_start[fname] * 1000

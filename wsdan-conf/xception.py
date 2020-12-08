@@ -26,5 +26,7 @@ model_name = 'model.ckpt'
 log_name = 'train.log'
 
 # checkpoint model for resume training
-ckpt = False
-datapath = "/mnt/ssd0/dfdc"
+# ckpt = False
+ckpt = "./pretrained_weights/ckpt_x.pth"
+# datapath = "/mnt/ssd0/dfdc"
+datapath = "./data/output_frames"

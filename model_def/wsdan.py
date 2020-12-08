@@ -119,6 +119,12 @@ class WSDAN(nn.Module):
         # Attention Maps
         self.attentions = BasicConv2d(self.num_features, self.M, kernel_size=1)
 
+        # Features Combination
+        self.up_dim1 = BasicConv2d(728, 2048, kernel_size=1)
+        self.up_dim2 = BasicConv2d(728, 2048, kernel_size=1)
+        self.down_sample1 = nn.MaxPool2d(3, 2, 1)
+        self.down_sample2 = nn.MaxPool2d(3, 2, 1)
+        
         # Bilinear Attention Pooling
         self.bap = BAP(pool='GAP')
 
@@ -131,7 +137,21 @@ class WSDAN(nn.Module):
         batch_size = x.size(0)
 
         # Feature Maps, Attention Maps and Feature Matrix
-        feature_maps = self.features(x)
+        # feature_maps = self.features(x)
+        if 'xception' in self.net:
+            feature_maps, skip_feature1, skip_feature2 = self.features(x)
+            # print("info | sizes:", feature_maps.size(), skip_feature1.size(), skip_feature2.size())
+            skip_feature1 = self.up_dim1(skip_feature1)
+            skip_feature1 = self.down_sample1(skip_feature1)
+            skip_feature2 = self.up_dim2(skip_feature2)
+            skip_feature2 = self.down_sample2(skip_feature2)
+            # print("info | sizes:", feature_maps.size(), skip_feature1.size(), skip_feature2.size())
+            feature_maps = feature_maps + skip_feature1 + skip_feature2
+            feature_maps = F.normalize(feature_maps, dim=-1)
+        elif 'efficientnet' in self.net:
+            with torch.no_grad():
+                feature_maps = self.features(x)
+
         if self.net != 'inception_mixed_7c':
             attention_maps = self.attentions(feature_maps)
         else:
@@ -151,6 +171,7 @@ class WSDAN(nn.Module):
             # Randomly choose one of attention maps Ak
             attention_map = []
             for i in range(batch_size):
+                #attention_weights = torch.sqrt(attention_maps[i].sum(dim=(1, 2)) + EPSILON)
                 attention_weights = torch.sqrt(attention_maps[i].sum(dim=(1, 2)).detach() + EPSILON)
                 attention_weights = F.normalize(attention_weights, p=1, dim=0)
                 k_index = np.random.choice(self.M, 2, p=attention_weights.cpu().numpy())

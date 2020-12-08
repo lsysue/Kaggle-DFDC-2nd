@@ -1,3 +1,4 @@
+# 原模型结构 + 概率计算trick + 模型集成trick
 import os
 import sys
 import time
@@ -19,7 +20,7 @@ class DFDCLoader:
     def __init__(self, video_dir, face_detector, transform=None,
                  batch_size=25, frame_skip=9, face_limit=25):
         self.video_dir = video_dir
-        self.file_list = sorted(f for f in os.listdir(video_dir) if f.endswith(".mp4"))
+        self.file_list = sorted(f for f in os.listdir(video_dir))# if f.endswith(".mp4"))
 
         self.transform = transform
         self.face_detector = face_detector
@@ -83,14 +84,9 @@ class DFDCLoader:
         batch_buf = []
         t0 = time.time()
         batch_count = 0
-
+        last_name = ""
         for fname, face in self.iter_one_face():
-            self.feedback_queue.append(fname)
-            if not batch_buf:   # batch_buf is clear
-                self.infer_start[fname] = time.time()
-            batch_buf.append(face)
-
-            if len(batch_buf) == self.batch_size:
+            if last_name != fname and last_name != "":
                 yield torch.stack(batch_buf)
 
                 batch_count += 1
@@ -100,25 +96,22 @@ class DFDCLoader:
                     print("T: %.2f ms / batch" % (elapsed / batch_count))
                     # 测试控制
                     # break
+            if fname != last_name:
+                self.feedback_queue.append(fname)
+            if not batch_buf:   # batch_buf is clear
+                self.infer_start[fname] = time.time()
+            batch_buf.append(face)
+            last_name = fname
 
         if len(batch_buf) > 0:
             yield torch.stack(batch_buf)
 
     def feedback(self, pred):
-        accessed = set()
-
-        for score in pred:
-            fname = self.feedback_queue.pop(0)
-            accessed.add(fname)
-            self.record[fname].append(score)
-
-        for fname in sorted(accessed):
-            # 各帧取平均
-            self.score[fname] = np.mean(self.record[fname])
-            # 推断开始时间，推断结束时间
-            self.infer_end[fname] = time.time()
-            print("[%s] %.6f | %.3f ms" % (fname, self.score[fname], (self.infer_end[fname] - self.infer_start[fname]) * 1000))
-
+        fname = self.feedback_queue.pop(0)
+        self.score[fname] = pred
+        print(pred)
+        self.infer_end[fname] = time.time()
+        print("[%s] %.6f | %.3f ms" % (fname, self.score[fname], (self.infer_end[fname] - self.infer_start[fname]) * 1000))
 
 def main(arg_dir):
     torch.set_grad_enabled(False)
@@ -131,18 +124,21 @@ def main(arg_dir):
     loader = DFDCLoader(test_dir, face_detector, T.ToTensor())
 
     model1 = xception(num_classes=2, pretrained=False)
-    ckpt = torch.load("./pretrained_weights/xception-hg-2.pth")
+    # ckpt = torch.load("./pretrained_weights/xception-hg-2.pth")
+    ckpt = torch.load("./trained_weights/dfdc-xception.pth/")
     model1.load_state_dict(ckpt["state_dict"])
     model1 = model1.cuda()
     model1.eval()
 
     model2 = WSDAN(num_classes=2, M=8, net="xception", pretrained=False).cuda()
-    ckpt = torch.load("./pretrained_weights/ckpt_x.pth")
+    # ckpt = torch.load("./pretrained_weights/ckpt_x.pth")
+    ckpt = torch.load("./trained_weights/dfdc-wsdan-x.pth/")
     model2.load_state_dict(ckpt["state_dict"])
     model2.eval()
 
     model3 = WSDAN(num_classes=2, M=8, net="efficientnet", pretrained=False).cuda()
-    ckpt = torch.load("./pretrained_weights/ckpt_e.pth")
+    # ckpt = torch.load("./pretrained_weights/ckpt_e.pth")
+    ckpt = torch.load("./trained_weights/dfdc-wsdan-e.pth/")
     model3.load_state_dict(ckpt["state_dict"])
     model3.eval()
 
@@ -163,15 +159,24 @@ def main(arg_dir):
         o3, _, _ = model3(i3)
         o3 = o3.softmax(-1)[:, 1].cpu().numpy()
 
-        out = 0.2 * o1 + 0.7 * o2 + 0.1 * o3
-        loader.feedback(out)
+        track_probs = np.concatenate((o1, o2, o3))
 
-    with open("submission.csv", "w") as fout:
+        delta = track_probs - 0.5
+        sign = np.sign(delta)
+        pos_delta = delta > 0
+        neg_delta = delta < 0
+        track_probs[pos_delta] = np.clip(0.5 + sign[pos_delta] * np.power(abs(delta[pos_delta]), 0.65), 0.01, 0.99)
+        track_probs[neg_delta] = np.clip(0.5 + sign[neg_delta] * np.power(abs(delta[neg_delta]), 0.65), 0.01, 0.99)
+        weights = np.power(abs(delta), 1.0) + 1e-4
+        video_score = float((track_probs * weights).sum() / weights.sum())
+        loader.feedback(video_score)
+
+    with open("result5.csv", "w") as fout:
         for fname in loader.file_list:
             pred = loader.score[fname]
             start_time = loader.infer_start[fname] * 1000
             end_time = loader.infer_end[fname] * 1000
-            print("%s\t%.6f\t%d\t%d" % (fname.split('.')[0], pred, start_time, end_time), file=fout)
+            print("%s\t%.6f\t%d\t%d" % (fname, pred, start_time, end_time), file=fout)
 
 
 if __name__ == "__main__":

@@ -72,8 +72,9 @@ class Block(nn.Module):
 
 
 class xception(nn.Module):
-    def __init__(self):
+    def __init__(self,skip_flag=True):
         super(xception, self).__init__()
+        self.skip = skip_flag
         self.conv1 = nn.Conv2d(3, 32, 3,2, 0, bias=False)
         self.bn1 = nn.BatchNorm2d(32)
         self.relu1 = nn.ReLU(inplace=True)
@@ -117,10 +118,18 @@ class xception(nn.Module):
         x = self.block1(x)
         x = self.block2(x)
         x = self.block3(x)
+
+        if self.skip:
+            x1 = x
+
         x = self.block4(x)
         x = self.block5(x)
         x = self.block6(x)
         x = self.block7(x)
+
+        if self.skip:
+            x2 = x
+
         x = self.block8(x)
         x = self.block9(x)
         x = self.block10(x)
@@ -133,5 +142,6 @@ class xception(nn.Module):
 
         x = self.conv4(x)
         x = self.bn4(x)
-        x=self.relu4(x)
-        return x
+        x = self.relu4(x)
+        # return x
+        return x, x1, x2

@@ -31,16 +31,16 @@ def norm_crop(img, landmark, image_size=112):
 
         for i in np.arange(src.shape[0]):
             tform.estimate(lmk, src[i])
-        M = tform.params[0:2, :]
+            M = tform.params[0:2, :]
 
-        results = np.dot(M, lmk_tran.T)
-        results = results.T
-        error = np.sum(np.sqrt(np.sum((results - src[i]) ** 2, axis=1)))
+            results = np.dot(M, lmk_tran.T)
+            results = results.T
+            error = np.sum(np.sqrt(np.sum((results - src[i]) ** 2, axis=1)))
 
-        if error < min_error:
-            min_error = error
-            min_M = M
-            min_index = i
+            if error < min_error:
+                min_error = error
+                min_M = M
+                min_index = i
 
         return min_M, min_index
 
